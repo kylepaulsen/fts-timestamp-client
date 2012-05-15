@@ -1,12 +1,11 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 
 import sys
 import argparse
 import requests
 import json
 import hashlib
-
-
+import os.path
 
 class TimestampServer:
   def __init__(self, api_url):
@@ -20,6 +19,12 @@ class TimestampServer:
 
   def _api_timestamps(self):
     return self.api_url + '/timestamps'
+    
+  def _api_timestamp(self, id):
+    return self.api_url + "/timestamps/%d" % id
+    
+  def _api_timestamp_by_hash(self, hash):
+    return self.api_url + "/timestamps/%s" % hash
 
   def prepare_submission(self):
     r = requests.get(self._api_timestamps_new())
@@ -27,44 +32,103 @@ class TimestampServer:
     return prepare_data['master_id'], prepare_data['salt']
 
   def submit_timestamp(self, hash, master_id):
-    r = requests.post(self._api_timestamps())
-    print(r.text)
+    r = requests.post(self._api_timestamps(), 
+      data={'hash': hash, 'master_block_id': master_id})
+    response = json.loads(r.text)
+    if response['success']:
+      r = requests.get(self._api_timestamp(response['new_timestamp_id']))
+      print(r.text)
+    else:
+      print("Submission failed: %s" % response['error'])
 
+    
+  def get_timestamp(self, id):
+    r = requests.get(self._api_timestamp(id))
+    res = json.loads(r.text)
+    return res['timestamp']
+    
+  def get_timestamp_by_hash(self, hash):
+    r = requests.get(self._api_timestamp_by_hash(hash))
+    res = json.loads(r.text)
+    return res['timestamp']
 
 
 class TimestampRequest:
   def __init__(self, file):
     self.encoded_data = file.read().encode()
-
+  
+  def make_hash(self, data, salt):
+    hasher = hashlib.sha512()
+    hasher.update(salt)
+    hasher.update(data)
+    return hasher.hexdigest()
+  
   def submit_to(self, server):
     master_id, salt = server.prepare_submission()
-    hasher = hashlib.sha512()
-    hasher.update(salt.encode())
-    hasher.update(self.encoded_data)
-    hash = hasher.hexdigest()
+    hash = self.make_hash(self.encoded_data, salt.encode())
     server.submit_timestamp(hash, master_id)
+    
+  #def search_for_hash(self, server):
+  #  ts = server.get_timestamp_by_hash();
+    
+#print json.separators
+server_list = [TimestampServer('http://fts-ruby.herokuapp.com/api/v1')]
 
-
+def check_cert(tsfile):
+  cert="derp"
+  if os.path.isfile(tsfile):
+    try:
+      f = open(tsfile, "rw")
+      cert = json.loads(f.read())
+      #f.write(json.dump)
+      f.close()
+    except ValueError:
+      print "Malformed Certificate File!!"
+  else:
+    f = open(tsfile, "w")
+    f.write('{"submitions": [], "blocks": [], "master_blocks": []}')
+    cert = json.loads('{"submitions": [], "blocks": [], "master_blocks": []}')
+    f.close()
+  return cert
+    
+    
+  
 
 def do_submit(args):
-  servers = [TimestampServer('http://fts-ruby.herokuapp.com')]
+  check_cert(args.cert or args.file.name + '.tscert')
   request = TimestampRequest(args.file)
-  for server in servers:
+  for server in server_list:
     request.submit_to(server)
 
 
+
+#def do_certificate(args):
+  
+  
+
+#def do_verify(args):
+#  request = TimestampRequest(args.file)
+#  for server in server_list:
+#    ts = request.search_for_hash(server)
 
 
 
 
 # setup command line parser
 parser = argparse.ArgumentParser(prog='fts')
+parser.add_argument('-c', '--cert')
 cmdparsers = parser.add_subparsers()
 
 # 'submit' command parser
 parser_submit = cmdparsers.add_parser('submit')
 parser_submit.add_argument('file', type=argparse.FileType('r'))
 parser_submit.set_defaults(func=do_submit)
+
+# 'verify' command parserserver_list = [TimestampServer('http://fts-ruby.herokuapp.com')]
+#parser_verify = cmdparsers.add_parser('verify')
+#parser_verify.add_argument('file', type=argparse.FileType('r'))
+#parser_verify.set_defaults(func=do_verify)
+
 
 
 # do it live!
