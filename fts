@@ -5,7 +5,7 @@ import argparse
 import requests
 import json
 import hashlib
-import os.path
+import os
 
 json._default_encoder = json.JSONEncoder(
   skipkeys=False,
@@ -16,6 +16,9 @@ json._default_encoder = json.JSONEncoder(
   separators=(',', ':'),
   default=None,
 )
+
+server_list = []
+new_cert = dict(filename="", submissions=[], blocks=[], master_blocks=[])
 
 class TimestampServer:
   def __init__(self, api_url):
@@ -37,19 +40,25 @@ class TimestampServer:
     return self.api_url + "/timestamps/%s" % hash
 
   def prepare_submission(self):
-    r = requests.get(self._api_timestamps_new())
-    prepare_data = json.loads(r.text)
-    return prepare_data['master_id'], prepare_data['salt']
+    try:
+      r = requests.get(self._api_timestamps_new())
+      prepare_data = json.loads(r.text)
+      return prepare_data['master_id'], prepare_data['salt']
+    except ValueError:
+      print("Could not communicate with server correctly. Do you have a valid url to a timestamp server?")
+      exit()
+    
 
   def submit_timestamp(self, hash, master_id):
     r = requests.post(self._api_timestamps(), 
       data={'hash': hash, 'master_block_id': master_id})
-    response = json.loads(r.text)
-    if response['success']:
-      r = requests.get(self._api_timestamp(response['new_timestamp_id']))
-      print(r.text)
-    else:
+    res = json.loads(r.text)
+    if 'error' in res:
       print("Submission failed: %s" % response['error'])
+      return res
+    else:
+      print(r.text)
+      return res
 
     
   def get_timestamp(self, id):
@@ -76,34 +85,67 @@ class TimestampRequest:
   def submit_to(self, server):
     master_id, salt = server.prepare_submission()
     hash = self.make_hash(self.encoded_data, salt.encode())
-    server.submit_timestamp(hash, master_id)
-    
-server_list = [TimestampServer('http://fts-ruby.herokuapp.com/api/v1')]
+    res = server.submit_timestamp(hash, master_id)
+    res["salt"] = salt
+    res["server"] = server.api_url
+    return res
 
-def check_cert(tsfile):
-  cert="derp"
-  if os.path.isfile(tsfile):
+def check_cert(tscert, filename=None):
+  cert = None
+  if os.path.isfile(tscert):
     try:
-      f = open(tsfile, "r+")
+      f = open(tscert, "r+")
       cert = json.loads(f.read())
-      f.seek(0)
-      f.write(json.dumps(cert))
+      if cert['filename'] is not filename and filename is not None:
+        ok = input("Warning! The certificate file you specified has another filename in it. Are you sure you want to proceed? (y/n): ")
+        print(ok)
+        if not ok == "y" and not ok == "Y":
+          print("Exiting!")
+          exit()
       f.close()
     except ValueError:
-      print("Malformed Certificate File!!")
+      print("Malformed Certificate File! Exiting!")
+      exit()
   else:
-    f = open(tsfile, "w")
-    f.write('{"submitions":[],"blocks":[],"master_blocks":[]}')
-    cert = json.loads('{"submitions":[],"blocks":[],"master_blocks":[]}')
-    f.close()
+    cert = new_cert
+    cert["filename"] = filename
   return cert
+  
+def update_cert(cert_file, cert):
+  f = open(cert_file, "w")
+  f.write(json.dumps(cert))
+  f.close()
+  #print(cert)
 
 def do_submit(args):
-  check_cert(args.cert or args.file.name + '.tscert')
+  cert_file = args.cert or args.file.name + '.tscert'
+  cert = check_cert(cert_file, args.file.name)
   request = TimestampRequest(args.file)
   for server in server_list:
-    request.submit_to(server)
-
+    res = request.submit_to(server)
+    if not 'error' in res:
+      cert["submissions"].append(res)
+  update_cert(cert_file, cert)
+  
+def load_config():
+  global server_list
+  home = os.getenv('USERPROFILE') or os.getenv('HOME')
+  config_file = home + '/.ftsconfig'
+  if os.path.isfile(config_file):
+    try:
+      f = open(config_file)
+      config = json.loads(f.read())
+      f.close()
+      for server in config['Servers']:
+        server_list.append(TimestampServer(server))
+    except ValueError:
+      print("Could not load config file! Malformed JSON!")
+      exit()
+  else:
+    f = open(config_file, 'w')
+    f.write("{\n\"Servers\": \n[\"http://fts-ruby.herokuapp.com/api/v1\"]\n}")
+    f.close()
+    server_list = [TimestampServer("http://fts-ruby.herokuapp.com/api/v1")]
 
 #def do_certificate(args):
 
@@ -115,6 +157,7 @@ def do_submit(args):
 # setup command line parser
 parser = argparse.ArgumentParser(prog='fts')
 parser.add_argument('-c', '--cert')
+parser.add_argument('-s', '--server')
 cmdparsers = parser.add_subparsers()
 
 # 'submit' command parser
@@ -129,5 +172,8 @@ parser_submit.set_defaults(func=do_submit)
 
 # do it live!
 if __name__ == "__main__":
+  load_config()  
   args = parser.parse_args()
+  if args.server is not None:
+    server_list = [TimestampServer(args.server)]
   sys.exit( args.func(args) )
