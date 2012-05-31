@@ -18,7 +18,7 @@ json._default_encoder = json.JSONEncoder(
 )
 
 server_list = []
-new_cert = dict(filename="", submissions=[], blocks=[], master_blocks=[])
+new_cert = dict(filename="", submissions=dict(), blocks=dict(), master_blocks=dict())
 
 class TimestampServer:
   def __init__(self, api_url):
@@ -64,7 +64,7 @@ class TimestampServer:
       return res
     else:
       print(r.text)
-      return res
+      return res["timestamp"]
 
     
   def get_timestamp(self, id):
@@ -80,7 +80,7 @@ class TimestampServer:
   def get_block(self, id):
     r = requests.get(self._api_block(id))
     res = json.loads(r.text)
-    return res
+    return res['block']
     
   def get_master_block(self, id):
     r = requests.get(self._api_master_block(id))
@@ -109,7 +109,11 @@ class TimestampRequest:
     
   def fetch_timestamp(self, id, server):
     serv = TimestampServer(server)
-    return serv.get_timestamp(id);
+    master_id, salt = serv.prepare_submission()
+    ts = serv.get_timestamp(id);
+    ts["salt"] = salt
+    ts["server"] = serv.api_url
+    return ts
     
   def fetch_block(self, id, server):
     serv = TimestampServer(server)
@@ -152,14 +156,11 @@ class Certificate:
     f.write(json.dumps(self.cert))
     f.close()
     
-  def add_master_block(self, master_block):
-    add = True
-    for mblk in self.cert["master_blocks"]:
-      if mblk == master_block:
-        add = False
-        break
-    if add:
-      self.cert["master_blocks"].append(master_block)
+  def add_master_block(self, key, master_block):
+    self.cert["master_blocks"][key] = master_block
+    
+  def add_block(self, key, block):
+    self.cert["blocks"][key] = block
 
 def do_submit(args):
   cert_file = args.cert or args.file.name + '.tscert'
@@ -169,10 +170,10 @@ def do_submit(args):
   for server in server_list:
     res = request.submit_to(server)
     if not 'error' in res:
-      cert.cert["submissions"].append(res)
-      master_id = res["timestamp"]["master_block_id"]
+      cert.cert["submissions"][server._api_timestamp(res["id"])] = res
+      master_id = res["master_block_id"]
       mblk = request.fetch_master_block(master_id, server.api_url)
-      cert.add_master_block(mblk)
+      cert.add_master_block(server._api_master_block(master_id), mblk)
   cert.update_cert()
   
 def load_config():
@@ -202,14 +203,27 @@ def do_verify(args):
   cert = Certificate(cert_file)
   cert.check_cert()
   for submission in cert.cert["submissions"]:
-    verify_submission(submission, cert)
+    verify_submission(cert.cert["submissions"][submission], cert)
   cert.update_cert()
 
 def verify_submission(submission, cert):
   req = TimestampRequest()
-  master_id = submission["timestamp"]["master_block_id"]
-  res = req.fetch_master_block(master_id, submission["server"])
-  cert.add_master_block(res)
+  server = TimestampServer(submission["server"])
+  master_id = submission["master_block_id"]
+  mb = req.fetch_master_block(master_id, submission["server"])
+  mb_key = server._api_master_block(master_id)
+  cert.add_master_block(mb_key, mb)
+  submission_id = submission["id"]
+  ts = req.fetch_timestamp(submission_id, submission["server"])
+  ts_key = server._api_timestamp(submission_id)
+  cert.cert["submissions"][ts_key] = ts
+  if ts["block_id"] != "null":
+    blk = req.fetch_block(ts["block_id"], submission["server"])
+    blk_key = server._api_block(blk["id"])
+    cert.add_block(blk_key, blk)
+    print("This certificate has complete data for a submition...")
+  
+  
 
 # setup command line parser
 parser = argparse.ArgumentParser(prog='fts')
