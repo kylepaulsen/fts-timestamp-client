@@ -38,6 +38,12 @@ class TimestampServer:
     
   def _api_timestamp_by_hash(self, hash):
     return self.api_url + "/timestamps/%s" % hash
+    
+  def _api_block(self, id):
+    return self.api_url + "/blocks/%d" % id
+    
+  def _api_master_block(self, id):
+    return self.api_url + "/master_blocks/%d" % id
 
   def prepare_submission(self):
     try:
@@ -70,11 +76,22 @@ class TimestampServer:
     r = requests.get(self._api_timestamp_by_hash(hash))
     res = json.loads(r.text)
     return res['timestamp']
+    
+  def get_block(self, id):
+    r = requests.get(self._api_block(id))
+    res = json.loads(r.text)
+    return res
+    
+  def get_master_block(self, id):
+    r = requests.get(self._api_master_block(id))
+    res = json.loads(r.text)
+    return res['master_block']
 
 
 class TimestampRequest:
-  def __init__(self, file):
-    self.encoded_data = file.read().encode()
+  def __init__(self, file = None):
+    if file is not None:
+      self.encoded_data = file.read().encode()
   
   def make_hash(self, data, salt):
     hasher = hashlib.sha512()
@@ -89,43 +106,74 @@ class TimestampRequest:
     res["salt"] = salt
     res["server"] = server.api_url
     return res
+    
+  def fetch_timestamp(self, id, server):
+    serv = TimestampServer(server)
+    return serv.get_timestamp(id);
+    
+  def fetch_block(self, id, server):
+    serv = TimestampServer(server)
+    return serv.get_block(id);
+    
+  def fetch_master_block(self, id, server):
+    serv = TimestampServer(server)
+    return serv.get_master_block(id);
 
-def check_cert(tscert, filename=None):
-  cert = None
-  if os.path.isfile(tscert):
-    try:
-      f = open(tscert, "r+")
-      cert = json.loads(f.read())
-      if cert['filename'] is not filename and filename is not None:
-        ok = input("Warning! The certificate file you specified has another filename in it. Are you sure you want to proceed? (y/n): ")
-        print(ok)
-        if not ok == "y" and not ok == "Y":
-          print("Exiting!")
-          exit()
-      f.close()
-    except ValueError:
-      print("Malformed Certificate File! Exiting!")
-      exit()
-  else:
-    cert = new_cert
-    cert["filename"] = filename
-  return cert
+class Certificate:
+  def __init__(self, file):
+      self.cert_file = file
+
+  def check_cert(self, filename=None):
+    self.cert = None
+    if os.path.isfile(self.cert_file):
+      try:
+        f = open(self.cert_file, "r+")
+        self.cert = json.loads(f.read())
+        if self.cert['filename'] != filename and filename is not None:
+          ok = input("Warning! The certificate file you specified has another filename in it. Are you sure you want to proceed? (y/n): ")
+          print(ok)
+          if not ok == "y" and not ok == "Y":
+            print("Exiting!")
+            exit()
+        f.close()
+      except ValueError:
+        print("Malformed Certificate File! Exiting!")
+        exit()
+    else:
+      if filename is not None:
+        self.cert = new_cert
+        self.cert["filename"] = filename
+      else:
+        print("Could not find cert file: %s" % self.cert_file)
+        exit()
   
-def update_cert(cert_file, cert):
-  f = open(cert_file, "w")
-  f.write(json.dumps(cert))
-  f.close()
-  #print(cert)
+  def update_cert(self):
+    f = open(self.cert_file, "w")
+    f.write(json.dumps(self.cert))
+    f.close()
+    
+  def add_master_block(self, master_block):
+    add = True
+    for mblk in self.cert["master_blocks"]:
+      if mblk == master_block:
+        add = False
+        break
+    if add:
+      self.cert["master_blocks"].append(master_block)
 
 def do_submit(args):
   cert_file = args.cert or args.file.name + '.tscert'
-  cert = check_cert(cert_file, args.file.name)
+  cert = Certificate(cert_file)
+  cert.check_cert(args.file.name)
   request = TimestampRequest(args.file)
   for server in server_list:
     res = request.submit_to(server)
     if not 'error' in res:
-      cert["submissions"].append(res)
-  update_cert(cert_file, cert)
+      cert.cert["submissions"].append(res)
+      master_id = res["timestamp"]["master_block_id"]
+      mblk = request.fetch_master_block(master_id, server.api_url)
+      cert.add_master_block(mblk)
+  cert.update_cert()
   
 def load_config():
   global server_list
@@ -149,10 +197,19 @@ def load_config():
 
 #def do_certificate(args):
 
-#def do_verify(args):
-#  request = TimestampRequest(args.file)
-#  for server in server_list:
-#    ts = request.search_for_hash(server)
+def do_verify(args):
+  cert_file = args.cert or args.file.name + '.tscert'
+  cert = Certificate(cert_file)
+  cert.check_cert()
+  for submission in cert.cert["submissions"]:
+    verify_submission(submission, cert)
+  cert.update_cert()
+
+def verify_submission(submission, cert):
+  req = TimestampRequest()
+  master_id = submission["timestamp"]["master_block_id"]
+  res = req.fetch_master_block(master_id, submission["server"])
+  cert.add_master_block(res)
 
 # setup command line parser
 parser = argparse.ArgumentParser(prog='fts')
@@ -166,9 +223,9 @@ parser_submit.add_argument('file', type=argparse.FileType('r'))
 parser_submit.set_defaults(func=do_submit)
 
 # 'verify' command parserserver_list = [TimestampServer('http://fts-ruby.herokuapp.com')]
-#parser_verify = cmdparsers.add_parser('verify')
-#parser_verify.add_argument('file', type=argparse.FileType('r'))
-#parser_verify.set_defaults(func=do_verify)
+parser_verify = cmdparsers.add_parser('verify')
+parser_verify.add_argument('file', type=argparse.FileType('r'))
+parser_verify.set_defaults(func=do_verify)
 
 # do it live!
 if __name__ == "__main__":
